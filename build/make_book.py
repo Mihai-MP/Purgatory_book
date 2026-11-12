@@ -319,7 +319,7 @@ em { font-style: italic; }
 .backcover .blurb p:first-child::first-letter { font: 600 15pt Disp; color: #d0645b; }
 .backcover .blurb p:last-child { font: italic 500 12pt/1.35 Disp; color: #c9c0ae; margin-top: 5mm; }
 .backcover .m { position: absolute; top: 24mm; left: 67mm; width: 14mm; height: 2.4mm; }
-.backcover .bt { position: absolute; top: 138mm; left: 0; right: 0; text-align: center; font: 500 7.6pt Disp; letter-spacing: .4em; color: #8f877a; }
+.backcover .bt { position: absolute; top: 116mm; left: 0; right: 0; text-align: center; font: 500 7.6pt Disp; letter-spacing: .4em; color: #b6ad9d; }
 .end { break-before: page; text-align: center; padding-top: 66mm; page: front; }
 .end .m { width: 28mm; height: 8.4mm; margin: 0 auto; }
 .end .t { font: 500 8.6pt Disp; letter-spacing: .4em; color: #4b463f; margin: 7mm -.4em 0 0; text-transform: uppercase; }
