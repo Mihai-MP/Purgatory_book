@@ -1,0 +1,4 @@
+build/.docx_preview.pdf
+build/cover.jpg
+__pycache__/
+*.docx.tmp
