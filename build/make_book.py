@@ -34,7 +34,7 @@ ACT = "Акт перший"
 SUBTITLE = "Початок світів"
 BASENAME = "chystylyshche_akt1"
 ASSETS = BUILD / "assets"
-ILLU = ROOT / "sources" / "art" / "book"   # ілюстрації за промптами з design/prompts.md
+ILLU = ROOT / "sources" / "art" / "book"   # обкладинка, форзаци, зад (промпти — design/prompts.md)
 
 ACCENT = art.CRIMSON   # кров і блискавка
 INK = art.INK
@@ -152,21 +152,33 @@ def make_assets(dpi=300):
     a["break"] = svg_to_png(art.scene_break(), 30, 3, ASSETS / "break.png")
     a["sprout"] = svg_to_png(art.sprout_mark(), 28, 8.4, ASSETS / "sprout.png")
 
-    # ілюстрації автора, якщо вже є (sources/art/book/…): обкладинка, пролог, частини, заставки розділів
+    # обкладинка, форзаци й задня обкладинка автора (sources/art/book/…), якщо вже є
     if (src := find_art("cover")):
-        a["cover_bg"] = plate(src, ASSETS / "cover_ill.jpg", W, H, top=.62)
-    if (src := find_art("prolog")):
-        a["prolog_plate"] = plate(src, ASSETS / "prolog_ill.jpg", W, H, top=0)
-    for n in range(1, 9):
-        if (src := find_art(f"part{n}")):
-            a[f"part{n}_bg"] = plate(src, ASSETS / f"part{n}_ill.jpg", W, H, top=.55)
-            a[f"part{n}_img"] = plate(src, ASSETS / f"part{n}_plain.jpg", W, H, top=0)
-    for n in range(0, 30):
-        if (src := find_art(f"ch{n:02d}")):
-            a[f"ch{n}"] = src
-    if (src := find_art("end")):
-        a["end"] = src
+        a["cover_bg"] = plate(src, ASSETS / "cover_ill.jpg", W, H, top=.5)
+    if (src := find_art("map")):
+        a["map"] = plate(src, ASSETS / "map.jpg", W, H, top=0)
+    if (src := find_art("endpaper_back")):
+        a["endpaper_back"] = plate(src, ASSETS / "endpaper_back.jpg", W, H, top=0)
+    a["back_bg"] = ASSETS / "back_bg.jpg"
+    if (src := find_art("back")):
+        plate(src, a["back_bg"], W, H, top=.62)
+    else:
+        art.field_image(W, H, int(H * 0.74), seed=12).save(a["back_bg"], quality=90)
     return a
+
+
+def labels():
+    """Підписи поверх карти/форзаців: design/labels.json → {"map": [{"x": мм, "y": мм, "text": …, "size": pt, "style": …}]}"""
+    import json
+    f = ROOT / "design" / "labels.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def annotation():
+    f = BOOK / "annotation.md"
+    if not f.exists():
+        return []
+    return [ln.strip() for ln in f.read_text(encoding="utf-8").split("\n\n") if ln.strip() and not ln.startswith("#")]
 
 
 def find_art(name):
@@ -294,10 +306,20 @@ em { font-style: italic; }
 .brk { width: 26mm; height: 2.6mm; margin: 4.4mm auto; break-after: avoid; }
 .brk svg, .m svg { display: block; }
 
-.plate { page: part; break-before: left; width: 148mm; height: 210mm; overflow: hidden; }
-.plate img { width: 148mm; height: 210mm; display: block; }
-.chapter.afterplate { break-before: right; }
-.chapter header img.vig, .end img.vig { display: block; width: 34mm; height: 34mm; object-fit: contain; margin: -10mm auto 6mm; }
+/* форзаци й задня обкладинка */
+.endpaper, .backcover { page: cover; break-before: page; position: relative; width: 148mm; height: 210mm; overflow: hidden; }
+.endpaper img.bg, .backcover img.bg { position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; }
+.endpaper .lbl { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; color: IVORY; font-family: Disp; font-weight: 500; }
+.endpaper .lbl.caps { text-transform: uppercase; letter-spacing: .28em; }
+.endpaper .lbl.italic { font-style: italic; }
+.endpaper .lbl.crimson { color: #d0645b; }
+.backcover { color: IVORY; }
+.backcover .blurb { position: absolute; top: 30mm; left: 22mm; right: 22mm; }
+.backcover .blurb p { font: 10.4pt/1.5 Text; text-indent: 0; margin: 0 0 3.4mm; text-align: left; hyphens: manual; color: #e4dccb; }
+.backcover .blurb p:first-child::first-letter { font: 600 15pt Disp; color: #d0645b; }
+.backcover .blurb p:last-child { font: italic 500 12pt/1.35 Disp; color: #c9c0ae; margin-top: 5mm; }
+.backcover .m { position: absolute; top: 24mm; left: 67mm; width: 14mm; height: 2.4mm; }
+.backcover .bt { position: absolute; top: 138mm; left: 0; right: 0; text-align: center; font: 500 7.6pt Disp; letter-spacing: .4em; color: #8f877a; }
 .end { break-before: page; text-align: center; padding-top: 66mm; page: front; }
 .end .m { width: 28mm; height: 8.4mm; margin: 0 auto; }
 .end .t { font: 500 8.6pt Disp; letter-spacing: .4em; color: #4b463f; margin: 7mm -.4em 0 0; text-transform: uppercase; }
@@ -322,6 +344,8 @@ def build_html(items, assets):
     h.append(f'''<section class="cover"><img class="bg" src="{assets["cover_bg"].as_uri()}">
       <div class="author">{AUTHOR.upper()}</div><div class="t">{TITLE.upper()}</div><div class="rule"></div>
       <div class="act">{ACT.upper()}</div><div class="s">{SUBTITLE}</div></section>''')
+    if "map" in assets:
+        h.append(endpaper_html(assets["map"], labels().get("map", [])))
     h.append(f'<section class="front halftitle" style="break-before: right"><div class="t">{TITLE.upper()}</div>{cells}</section>')
     h.append(f'''<section class="front titlepage"><div class="author">{AUTHOR.upper()}</div>
       <div class="t">{TITLE.upper()}</div><div class="rule"></div>
@@ -346,18 +370,13 @@ def build_html(items, assets):
     pn = 0
     for it in items:
         if it["kind"] == "part":
-            bg = assets.get(f"part{pn + 1}_bg", assets["part_bg"])
-            h.append(f'<section class="partpage"><img class="bg" src="{bg.as_uri()}">'
+            h.append(f'<section class="partpage"><img class="bg" src="{assets["part_bg"].as_uri()}">'
                      f'<div class="num">{PART_NUM[pn]}</div>'
                      f'<div class="lab">{html.escape(it["label"])}</div><h1>{html.escape(typo(it["name"]))}</h1></section>')
             pn += 1
             continue
-        if it["num"] == 0 and "prolog_plate" in assets:
-            h.append(f'<section class="plate"><img src="{assets["prolog_plate"].as_uri()}"></section>')
-        vig = assets.get(f'ch{it["num"]}')
-        vig = f'<img class="vig" src="{vig.as_uri()}">' if vig else ""
-        h.append(f'<section class="chapter{" afterplate" if it["num"] == 0 and "prolog_plate" in assets else ""}" id="{it["id"]}">'
-                 f'<header>{vig}<div class="lab">{html.escape(it["label"])}</div>'
+        h.append(f'<section class="chapter" id="{it["id"]}">'
+                 f'<header><div class="lab">{html.escape(it["label"])}</div>'
                  f'<h2>{html.escape(typo(it["name"]))}</h2>{cells}</header>')
         first = True
         for b in it["blocks"]:
@@ -376,11 +395,26 @@ def build_html(items, assets):
                 body = f'<span class="dc">{body[0]}</span>{body[1:]}'
             h.append(f'<p class="{cls}">{body}</p>' if cls else f"<p>{body}</p>")
         h.append("</section>")
-    endmark = f'<img class="vig" src="{assets["end"].as_uri()}">' if "end" in assets else f'<div class="m">{art.sprout_mark()}</div>'
-    h.append(f'<section class="end">{endmark}<div class="t">Далі — акт другий</div>'
+    h.append(f'<section class="end"><div class="m">{art.sprout_mark()}</div><div class="t">Далі — акт другий</div>'
              f'<div class="s">Напівмертвий загін</div></section>')
+    if "endpaper_back" in assets:
+        h.append(endpaper_html(assets["endpaper_back"], labels().get("endpaper_back", [])))
+    blurb = "".join(f"<p>{para_html(x)}</p>" for x in annotation())
+    h.append(f'<section class="backcover"><img class="bg" src="{assets["back_bg"].as_uri()}">'
+             f'<div class="m">{art.cells_mark(color=IVORY)}</div><div class="blurb">{blurb}</div>'
+             f'<div class="bt">{AUTHOR.upper()} · {TITLE.upper()}</div></section>')
     h.append("</body></html>")
     return "\n".join(h)
+
+
+def endpaper_html(img, lbls):
+    out = [f'<section class="endpaper"><img class="bg" src="{img.as_uri()}">']
+    for l in lbls:
+        cls = " ".join(l.get("style", "").split())
+        out.append(f'<div class="lbl {cls}" style="left:{l["x"]}mm; top:{l["y"]}mm; font-size:{l.get("size", 9)}pt">'
+                   f'{html.escape(typo(l["text"]))}</div>')
+    out.append("</section>")
+    return "".join(out)
 
 
 def build_pdf(items, assets, path):
@@ -388,16 +422,21 @@ def build_pdf(items, assets, path):
     HTML(string=build_html(items, assets), base_url=str(ROOT)).write_pdf(path)
 
 
-def cover_from_pdf(pdf, path, dpi=250):
-    """Перша сторінка PDF → JPEG: обкладинка для DOCX і окремим файлом."""
-    subprocess.run(["pdftoppm", "-f", "1", "-l", "1", "-r", str(dpi), "-jpeg", "-jpegopt", "quality=92",
+def page_jpg(pdf, page, path, dpi=250):
+    """Сторінка PDF → JPEG: обкладинки й форзаци для DOCX (з усім текстом поверх)."""
+    subprocess.run(["pdftoppm", "-f", str(page), "-l", str(page), "-r", str(dpi), "-jpeg", "-jpegopt", "quality=92",
                     "-singlefile", str(pdf), str(path.with_suffix(""))], check=True)
     return path
 
 
+def pdf_pages(pdf):
+    out = subprocess.run(["pdfinfo", str(pdf)], capture_output=True, text=True).stdout
+    return int(re.search(r"Pages:\s+(\d+)", out).group(1))
+
+
 # ----------------------------------------------------------------- DOCX ----
 
-def build_docx(items, cover_png, assets, path, toc_pages=None):
+def build_docx(items, pages_img, assets, path, toc_pages=None):
     from docx import Document
     from docx.enum.section import WD_SECTION
     from docx.enum.style import WD_STYLE_TYPE
@@ -541,10 +580,19 @@ def build_docx(items, cover_png, assets, path, toc_pages=None):
     p = doc.paragraphs[0] if doc.paragraphs else doc.add_paragraph()
     p.style = st["Body First"]; p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.line_spacing = 1.0
-    p.add_run().add_picture(str(cover_png), width=Mm(148), height=Mm(209.6))
+    p.add_run().add_picture(str(pages_img["cover"]), width=Mm(148), height=Mm(209.6))
 
     def new_section(start=WD_SECTION.NEW_PAGE):
         s = doc.add_section(start); page_setup(s); return s
+
+    def full_page(img):
+        s = doc.add_section(WD_SECTION.NEW_PAGE); page_setup(s, cover=True); headers(s, numbers=False, first_blank=False)
+        fp = doc.add_paragraph(style="Body First"); fp.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.line_spacing = 1.0
+        fp.add_run().add_picture(str(img), width=Mm(148), height=Mm(209.6))
+
+    if "map" in pages_img:
+        full_page(pages_img["map"])
 
     # --- титул
     s = new_section(WD_SECTION.ODD_PAGE); headers(s, numbers=False, first_blank=False)
@@ -602,24 +650,10 @@ def build_docx(items, cover_png, assets, path, toc_pages=None):
             doc.add_paragraph(it["label"], style="Part Label")
             doc.add_paragraph(typo(it["name"]), style="Heading 1")
             o = doc.add_paragraph(style="Ornament"); o.paragraph_format.space_before = Pt(36)
-            pimg = assets.get(f"part{pn}_img")
-            if pimg:
-                o.add_run().add_picture(str(pimg), width=Mm(72))
-            else:
-                o.add_run().add_picture(str(assets["part_light"]), width=Mm(110))
+            o.add_run().add_picture(str(assets["part_light"]), width=Mm(110))
             continue
-        if it["num"] == 0 and "prolog_plate" in assets:
-            s = new_section(); headers(s, numbers=False, first_blank=False)
-            pp = doc.add_paragraph(style="Ornament"); pp.paragraph_format.space_before = Pt(10)
-            pp.add_run().add_picture(str(assets["prolog_plate"]), width=Mm(110))
         s = new_section(); headers(s, title=typo(it["name"]))
-        vig = assets.get(f'ch{it["num"]}')
-        cl = doc.add_paragraph(it["label"], style="Chapter Label")
-        if vig:
-            cl.paragraph_format.space_before = Pt(18)
-            vp = doc.add_paragraph(style="Ornament"); vp.paragraph_format.space_before = Pt(20)
-            vp.add_run().add_picture(str(vig), width=Mm(30))
-            cl._p.addprevious(vp._p)
+        doc.add_paragraph(it["label"], style="Chapter Label")
         doc.add_paragraph(typo(it["name"]), style="Heading 2")
         cr = doc.add_paragraph(style="Chapter Rule")
         cr.add_run().add_picture(str(assets["cells"]), width=Mm(11))
@@ -647,9 +681,12 @@ def build_docx(items, cover_png, assets, path, toc_pages=None):
 
     s = new_section(); headers(s, numbers=False, first_blank=False)
     o = doc.add_paragraph(style="Ornament"); o.paragraph_format.space_before = Pt(180)
-    o.add_run().add_picture(str(assets.get("end", assets["sprout"])), width=Mm(34 if "end" in assets else 28))
+    o.add_run().add_picture(str(assets["sprout"]), width=Mm(28))
     e = doc.add_paragraph("Далі — акт другий", style="Front Small"); e.paragraph_format.space_before = Pt(14)
     doc.add_paragraph("Напівмертвий загін", style="Front Sub").runs[0].font.size = Pt(13)
+    if "endpaper_back" in pages_img:
+        full_page(pages_img["endpaper_back"])
+    full_page(pages_img["back"])
 
     # --- налаштування документа: дзеркальні поля, парні/непарні колонтитули, вбудовані шрифти
     settings = doc.settings.element
@@ -762,12 +799,18 @@ def main():
     pdf = OUT / f"{BASENAME}.pdf"
     build_pdf(items, assets, pdf)
     print("PDF:", pdf)
-    cover = cover_from_pdf(pdf, OUT / f"{BASENAME}_cover.jpg")
+    n = pdf_pages(pdf)
+    imgs = {"cover": page_jpg(pdf, 1, OUT / f"{BASENAME}_cover.jpg"),
+            "back": page_jpg(pdf, n, OUT / f"{BASENAME}_back.jpg")}
+    if "map" in assets:
+        imgs["map"] = page_jpg(pdf, 2, ASSETS / "map_page.jpg")
+    if "endpaper_back" in assets:
+        imgs["endpaper_back"] = page_jpg(pdf, n - 1, ASSETS / "endpaper_back_page.jpg")
     docx = OUT / f"{BASENAME}.docx"
-    build_docx(items, cover, assets, docx)
+    build_docx(items, imgs, assets, docx)
     pages = docx_toc_pages(docx, items)
     if pages:
-        build_docx(items, cover, assets, docx, pages)
+        build_docx(items, imgs, assets, docx, pages)
         print("DOCX TOC pages:", pages)
     print("DOCX:", docx)
 
