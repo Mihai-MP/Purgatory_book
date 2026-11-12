@@ -7,9 +7,7 @@
 збереться, а Word оновить зміст сам (F9).
 Результат — у export/.
 """
-import copy
 import html
-import io
 import os
 import re
 import shutil
@@ -19,7 +17,10 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import art  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -27,17 +28,19 @@ FONTS = BUILD / "fonts"
 BOOK = ROOT / "book" / "act1"
 OUT = ROOT / "export"
 
-AUTHOR = "Микола Мігай"
+AUTHOR = "Мігель Ніколсон"
 TITLE = "Чистилище"
 ACT = "Акт перший"
 SUBTITLE = "Початок світів"
 BASENAME = "chystylyshche_akt1"
+ASSETS = BUILD / "assets"
+ILLU = ROOT / "sources" / "art" / "book"   # ілюстрації за промптами з design/prompts.md
 
-ACCENT = "#8b1e1e"   # темно-червоний, як стрічка на капелюсі з обкладинки
-INK = "#1b1a19"
-PAPER = "#fbf8f1"
-NIGHT = "#0c0c0f"
-IVORY = "#ece4d3"
+ACCENT = art.CRIMSON   # кров і блискавка
+INK = art.INK
+PAPER = "#f8f5ee"
+NIGHT = art.NIGHT
+IVORY = art.IVORY
 
 
 # ---------------------------------------------------------------- текст ----
@@ -90,7 +93,8 @@ def parse():
                 if label.startswith("Частина"):
                     items.append({"kind": "part", "label": label, "name": name})
                 else:
-                    cur = {"kind": "chapter", "label": label, "name": name, "blocks": [], "id": f"ch{len(items)}"}
+                    cur = {"kind": "chapter", "label": label, "name": name, "blocks": [], "id": f"ch{len(items)}",
+                           "num": int(f.name[:2])}
                     items.append(cur)
                     paras = cur["blocks"]
                 continue
@@ -119,58 +123,81 @@ def font(name):
     return str(FONTS / name)
 
 
-# ------------------------------------------------------------ обкладинка ----
+# ------------------------------------------------------------ оформлення ----
 
-def make_cover(path: Path, dpi=300):
-    W, H = round(148 / 25.4 * dpi), round(210 / 25.4 * dpi)
-    art = Image.open(ROOT / "sources/art/cover_ririka_niko.webp").convert("RGB")
-    art = art.resize((W, W), Image.LANCZOS)
-    canvas = Image.new("RGB", (W, H), NIGHT)
-    canvas.paste(art, (0, 0))
-    # плавне згасання арту в ніч
-    fade = Image.new("L", (1, H), 0)
-    f0, f1 = int(W * 0.58), int(W * 1.0)
-    for y in range(H):
-        a = 0 if y < f0 else (255 if y > f1 else int(255 * ((y - f0) / (f1 - f0)) ** 1.3))
-        fade.putpixel((0, y), a)
-    night = Image.new("RGB", (W, H), NIGHT)
-    canvas = Image.composite(night, canvas, fade.resize((W, H)))
-    # легка віньєтка по краях
-    vig = Image.new("L", (W, H), 0)
-    dv = ImageDraw.Draw(vig)
-    for i in range(60):
-        dv.rectangle([i, i, W - i, H - i], outline=int(150 * (1 - i / 60) ** 2))
-    canvas = Image.composite(night, canvas, vig)
-
-    d = ImageDraw.Draw(canvas)
-
-    def centered(text, y, fnt, fill, spacing=0):
-        if spacing:
-            widths = [d.textlength(ch, font=fnt) for ch in text]
-            total = sum(widths) + spacing * (len(text) - 1)
-            x = (W - total) / 2
-            for ch, w in zip(text, widths):
-                d.text((x, y), ch, font=fnt, fill=fill)
-                x += w + spacing
-        else:
-            d.text(((W - d.textlength(text, font=fnt)) / 2, y), text, font=fnt, fill=fill)
-
-    ft_title = ImageFont.truetype(font("CormorantGaramond-600.ttf"), int(W * 0.118))
-    ft_act = ImageFont.truetype(font("CormorantGaramond-500.ttf"), int(W * 0.03))
-    ft_sub = ImageFont.truetype(font("CormorantGaramond-500i.ttf"), int(W * 0.062))
-    ft_auth = ImageFont.truetype(font("CormorantGaramond-500.ttf"), int(W * 0.034))
-
-    y = int(H * 0.645)
-    centered(TITLE.upper(), y, ft_title, IVORY, spacing=int(W * 0.012))
-    y += int(W * 0.16)
-    d.line([(W * 0.40, y), (W * 0.60, y)], fill="#a3262a", width=4)
-    y += int(W * 0.035)
-    centered(ACT.upper(), y, ft_act, "#b9b0a0", spacing=int(W * 0.012))
-    y += int(W * 0.05)
-    centered(SUBTITLE, y, ft_sub, IVORY)
-    centered(AUTHOR.upper(), int(H * 0.935), ft_auth, "#b9b0a0", spacing=int(W * 0.010))
-    canvas.save(path, quality=92)
+def svg_to_png(svg, w_mm, h_mm, path, dpi=600):
+    """Раструє невеликий SVG (орнамент) у PNG через WeasyPrint і pdftoppm — для DOCX."""
+    from weasyprint import HTML
+    with tempfile.TemporaryDirectory() as td:
+        pdf = Path(td) / "o.pdf"
+        HTML(string=f'<style>@page{{size:{w_mm}mm {h_mm}mm;margin:0}}body{{margin:0}}'
+                    f'div{{width:{w_mm}mm;height:{h_mm}mm}}</style><div>{svg}</div>').write_pdf(pdf)
+        subprocess.run(["pdftoppm", "-r", str(dpi), "-png", "-singlefile", str(pdf), str(path.with_suffix(""))], check=True)
     return path
+
+
+def make_assets(dpi=300):
+    """Фони (растр) і орнаменти. Повертає словник шляхів у build/assets/."""
+    ASSETS.mkdir(exist_ok=True)
+    W, H = round(148 / 25.4 * dpi), round(210 / 25.4 * dpi)
+    a = {}
+    a["cover_bg"] = ASSETS / "cover_bg.jpg"
+    art.field_image(W, H, int(H * 0.705), bolt=True, bolt_from=int(H * 0.47), seed=5).save(a["cover_bg"], quality=90)
+    a["part_bg"] = ASSETS / "part_bg.jpg"
+    art.field_image(W, H, int(H * 0.60), seed=8).save(a["part_bg"], quality=90)
+    a["part_light"] = ASSETS / "part_light.png"
+    pw, ph = round(110 / 25.4 * dpi), round(62 / 25.4 * dpi)
+    art.field_image(pw, ph, int(ph * 0.22), dark=False).save(a["part_light"])
+    a["cells"] = svg_to_png(art.cells_mark(), 14, 2.4, ASSETS / "cells.png")
+    a["break"] = svg_to_png(art.scene_break(), 30, 3, ASSETS / "break.png")
+    a["sprout"] = svg_to_png(art.sprout_mark(), 28, 8.4, ASSETS / "sprout.png")
+
+    # ілюстрації автора, якщо вже є (sources/art/book/…): обкладинка, пролог, частини, заставки розділів
+    if (src := find_art("cover")):
+        a["cover_bg"] = plate(src, ASSETS / "cover_ill.jpg", W, H, top=.62)
+    if (src := find_art("prolog")):
+        a["prolog_plate"] = plate(src, ASSETS / "prolog_ill.jpg", W, H, top=0)
+    for n in range(1, 9):
+        if (src := find_art(f"part{n}")):
+            a[f"part{n}_bg"] = plate(src, ASSETS / f"part{n}_ill.jpg", W, H, top=.55)
+            a[f"part{n}_img"] = plate(src, ASSETS / f"part{n}_plain.jpg", W, H, top=0)
+    for n in range(0, 30):
+        if (src := find_art(f"ch{n:02d}")):
+            a[f"ch{n}"] = src
+    if (src := find_art("end")):
+        a["end"] = src
+    return a
+
+
+def find_art(name):
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        f = ILLU / f"{name}.{ext}"
+        if f.exists():
+            return f
+    return None
+
+
+def plate(src, out, W, H, top=.55):
+    """Обрізає ілюстрацію під A5 і (top>0) затемнює верх, щоб на ній читалася назва."""
+    import numpy as np
+    from PIL import Image
+    im = Image.open(src).convert("RGB")
+    r = W / H
+    w, h = im.size
+    if w / h > r:
+        nw = int(h * r); im = im.crop(((w - nw) // 2, 0, (w - nw) // 2 + nw, h))
+    else:
+        nh = int(w / r); im = im.crop((0, (h - nh) // 2, w, (h - nh) // 2 + nh))
+    im = im.resize((W, H), Image.LANCZOS)
+    if top:
+        arr = np.asarray(im).astype(np.float32)
+        y = np.linspace(0, 1, H)[:, None, None]
+        k = np.clip(1 - y / top, 0, 1) ** 1.3 * .82          # зверху темніше
+        k = np.maximum(k, np.clip((y - .9) / .1, 0, 1) * .5)  # і трохи знизу
+        night = np.array(art._hex(NIGHT), np.float32)
+        im = Image.fromarray((arr * (1 - k) + night * k).astype(np.uint8))
+    im.save(out, quality=90)
+    return out
 
 
 # ------------------------------------------------------------------ PDF ----
@@ -190,121 +217,152 @@ CSS = r"""
   size: 148mm 210mm;
   margin: 19mm 15mm 21mm 15mm;
   background: PAPER;
-  @bottom-center { content: counter(page); font: 500 10pt Disp; color: #6d665c; padding-top: 4mm; }
 }
 @page :left  { margin-left: 15mm; margin-right: 20mm;
-  @top-center { content: string(book, first-except); font: 500 7.5pt Disp; letter-spacing: .12em; color: #8a8276; } }
+  @top-left { content: string(book, first-except); font: 500 7.2pt Disp; letter-spacing: .32em; color: #8a8276; }
+  @bottom-left { content: counter(page); font: 500 9.5pt Disp; color: #6d665c; padding-top: 4mm; } }
 @page :right { margin-left: 20mm; margin-right: 15mm;
-  @top-center { content: string(chap, first-except); font: italic 9pt Disp; color: #8a8276; } }
-@page cover { margin: 0; background: NIGHT; @bottom-center { content: none } @top-center { content: none } }
-@page front { @bottom-center { content: none } @top-center { content: none } }
-@page part  { background: NIGHT; @bottom-center { content: none } @top-center { content: none } }
-@page :blank { @top-center { content: none } @bottom-center { content: none } }
+  @top-right { content: string(chap, first-except); font: italic 9pt Disp; color: #8a8276; }
+  @bottom-right { content: counter(page); font: 500 9.5pt Disp; color: #6d665c; padding-top: 4mm; } }
+@page cover { margin: 0; background: NIGHT;
+  @top-left { content: none } @top-right { content: none } @bottom-left { content: none } @bottom-right { content: none } }
+@page front { @top-left { content: none } @top-right { content: none } @bottom-left { content: none } @bottom-right { content: none } }
+@page part  { margin: 0; background: NIGHT;
+  @top-left { content: none } @top-right { content: none } @bottom-left { content: none } @bottom-right { content: none } }
+@page :blank { @top-left { content: none } @top-right { content: none } @bottom-left { content: none } @bottom-right { content: none } }
 
 html { font-family: Text; font-size: 10.6pt; line-height: 1.42; color: INK; hyphens: auto; }
 body { margin: 0; }
 
-.cover { page: cover; height: 210mm; width: 148mm; }
-.cover img { width: 148mm; height: 210mm; display: block; }
+/* обкладинка: поле, блискавка, назва */
+.cover { page: cover; position: relative; width: 148mm; height: 210mm; overflow: hidden; color: IVORY; text-align: center; }
+.cover .bg { position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; }
+.cover .author { position: absolute; top: 19mm; left: 0; right: 0; font: 500 9.5pt Disp; letter-spacing: .42em; color: #b6ad9d; }
+.cover .t { position: absolute; top: 37mm; left: 0; right: 0; font: 600 41pt Disp; letter-spacing: .16em; margin-right: -.16em; line-height: 1; }
+.cover .rule { position: absolute; top: 59mm; left: 64mm; width: 20mm; height: .7pt; background: CRIMSON_LIGHT; }
+.cover .act { position: absolute; top: 64mm; left: 0; right: 0; font: 500 8.5pt Disp; letter-spacing: .46em; color: #b6ad9d; }
+.cover .s { position: absolute; top: 70mm; left: 0; right: 0; font: italic 500 19pt Disp; }
 
 .front { page: front; break-before: page; text-align: center; }
-.halftitle { padding-top: 62mm; }
-.halftitle .t { font: 500 22pt Disp; letter-spacing: .28em; margin-right: -.28em; }
-.halftitle .s { font: italic 13pt Disp; color: #6d665c; margin-top: 2mm; }
+.halftitle { padding-top: 64mm; }
+.halftitle .t { font: 500 20pt Disp; letter-spacing: .3em; margin-right: -.3em; }
+.halftitle .m { width: 14mm; height: 2.4mm; margin: 6mm auto 0; }
 
-.titlepage { break-before: right; padding-top: 22mm; }
-.titlepage .author { font: 500 11pt Disp; letter-spacing: .3em; color: #4b463f; }
-.titlepage .t { font: 600 38pt Disp; letter-spacing: .14em; margin: 36mm -.14em 0 0; line-height: 1; }
-.titlepage .rule { width: 22mm; height: .6pt; background: ACCENT; margin: 7mm auto 6mm; }
-.titlepage .act { font: 500 10pt Disp; letter-spacing: .3em; color: #4b463f; }
-.titlepage .s { font: italic 500 21pt Disp; margin-top: 2mm; }
-.titlepage .orn { margin-top: 40mm; font: 16pt Disp; color: ACCENT; }
+.titlepage { break-before: right; padding-top: 20mm; }
+.titlepage .author { font: 500 10.5pt Disp; letter-spacing: .36em; color: #4b463f; margin-right: -.36em; }
+.titlepage .t { font: 600 37pt Disp; letter-spacing: .15em; margin: 40mm -.15em 0 0; line-height: 1; }
+.titlepage .rule { width: 20mm; height: .6pt; background: ACCENT; margin: 7mm auto 6mm; }
+.titlepage .act { font: 500 9.5pt Disp; letter-spacing: .36em; color: #4b463f; margin-right: -.36em; }
+.titlepage .s { font: italic 500 20pt Disp; margin-top: 2mm; }
+.titlepage .m { width: 16mm; height: 2.8mm; margin: 44mm auto 0; }
 
-.colophon { text-align: left; padding-top: 128mm; font-size: 8.4pt; line-height: 1.5; color: #5a544b; hyphens: manual; }
-.colophon p { margin: 0 0 2.2mm; text-indent: 0; }
+.colophon { text-align: left; padding-top: 132mm; font-size: 8.4pt; line-height: 1.5; color: #5a544b; hyphens: manual; }
+.colophon p { margin: 0 0 2.2mm; text-indent: 0; text-align: left; }
 
-.epigraph { padding-top: 70mm; padding-left: 26mm; text-align: left; }
-.epigraph p { font: italic 15pt Disp; line-height: 1.3; margin: 0; }
-.epigraph .src { font: 500 8pt Disp; letter-spacing: .2em; color: #8a8276; margin-top: 4mm; font-style: normal; }
+.epigraph { padding-top: 72mm; padding-left: 24mm; text-align: left; }
+.epigraph p { font: italic 16pt Disp; line-height: 1.3; margin: 0; text-indent: 0; }
+.epigraph .m { width: 12mm; height: 2mm; margin: 5mm 0 0; }
 
 .toc { page: front; break-before: right; }
-.toc h2 { font: 500 11pt Disp; letter-spacing: .34em; text-align: center; margin: 4mm 0 7mm; color: #3a362f; }
+.toc h2 { font: 500 10.5pt Disp; letter-spacing: .4em; text-align: center; margin: 4mm -.4em 4mm 0; color: #3a362f; }
+.toc .m { width: 12mm; height: 2mm; margin: 0 auto 7mm; }
 .toc ul { list-style: none; padding: 0; margin: 0; }
 .toc li { font-size: 9.6pt; line-height: 1.2; margin: 0 0 1.2mm; }
-.toc li.part { font: 500 7.6pt Disp; letter-spacing: .22em; color: ACCENT; margin: 3.4mm 0 1.2mm; text-transform: uppercase; }
-.toc li.part em { font: italic 500 10.5pt Disp; letter-spacing: 0; text-transform: none; color: #3a362f; }
+.toc li.tpart { font: 500 7.6pt Disp; letter-spacing: .22em; color: ACCENT; margin: 3.4mm 0 1.2mm; text-transform: uppercase; }
+.toc li.tpart em { font: italic 500 10.5pt Disp; letter-spacing: 0; text-transform: none; color: #3a362f; }
 .toc a { color: inherit; text-decoration: none; }
 .toc a::after { content: leader('.') target-counter(attr(href url), page); color: #6d665c; font-family: Disp; font-weight: 500; }
 .toc .lab { color: #8a8276; font: 500 8.6pt Disp; display: inline-block; width: 18mm; }
 
-.partpage { page: part; break-before: right; color: IVORY; text-align: center; padding-top: 58mm; }
-.partpage .lab { font: 500 9pt Disp; letter-spacing: .4em; color: #b04a45; text-transform: uppercase; margin-right: -.4em; }
-.partpage h1 { font: 500 31pt Disp; margin: 7mm 0 0; line-height: 1.1; font-weight: 500; }
-.partpage .orn { margin-top: 12mm; font: 15pt Disp; color: #7b736a; }
+/* сторінка частини: ніч, поле до обрію */
+.partpage { page: part; break-before: right; position: relative; width: 148mm; height: 210mm; overflow: hidden; color: IVORY; text-align: center; }
+.partpage .bg { position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; }
+.partpage .lab { position: absolute; top: 58mm; left: 0; right: 0; font: 500 8.6pt Disp; letter-spacing: .46em; color: #c0574f; text-transform: uppercase; margin-right: -.46em; }
+.partpage h1 { position: absolute; top: 66mm; left: 10mm; right: 10mm; font: 500 32pt Disp; margin: 0; line-height: 1.1; }
+.partpage .num { position: absolute; top: 30mm; left: 0; right: 0; font: 600 12pt Disp; color: #6f675d; letter-spacing: .3em; }
 
 .chapter { page: chapter; break-before: page; }
-.chapter header { padding-top: 22mm; margin-bottom: 13mm; text-align: center; }
-.chapter header .lab { font: 500 8.4pt Disp; letter-spacing: .38em; text-transform: uppercase; color: ACCENT; margin-right: -.38em; }
-.chapter header h2 { font: 500 23pt Disp; line-height: 1.12; margin: 4mm 0 0; string-set: chap content(), book "Ч И С Т И Л И Щ Е"; }
-.chapter header .rule { width: 12mm; height: .5pt; background: #b8afa1; margin: 6mm auto 0; }
+.chapter header { padding-top: 22mm; margin-bottom: 12mm; text-align: center; }
+.chapter header .lab { font: 500 8.4pt Disp; letter-spacing: .4em; text-transform: uppercase; color: ACCENT; margin-right: -.4em; }
+.chapter header h2 { font: 500 23pt Disp; line-height: 1.12; margin: 4mm 0 0; string-set: chap content(), book "ЧИСТИЛИЩЕ"; }
+.chapter header .m { width: 11mm; height: 1.9mm; margin: 6mm auto 0; }
 
 p { margin: 0; text-indent: 1.5em; text-align: justify; orphans: 2; widows: 2; }
 p.noind { text-indent: 0; }
 .dc { float: left; font-family: Disp; font-weight: 600; font-size: 56pt; line-height: 44pt; height: 44pt; margin: 3pt 4pt 0 -1pt; color: ACCENT; }
 em { font-style: italic; }
-.brk { text-align: center; margin: 4.2mm 0 4.2mm; font: 12pt Disp; color: ACCENT; letter-spacing: .5em; margin-right: -.5em; break-after: avoid; }
+.brk { width: 26mm; height: 2.6mm; margin: 4.4mm auto; break-after: avoid; }
+.brk svg, .m svg { display: block; }
 
-.end { break-before: page; text-align: center; padding-top: 70mm; page: front; }
-.end .orn { font: 16pt Disp; color: ACCENT; }
-.end .t { font: 500 9pt Disp; letter-spacing: .36em; color: #4b463f; margin-top: 6mm; text-transform: uppercase; margin-right: -.36em; }
-.end .s { font: italic 13pt Disp; color: #6d665c; margin-top: 3mm; }
+.plate { page: part; break-before: left; width: 148mm; height: 210mm; overflow: hidden; }
+.plate img { width: 148mm; height: 210mm; display: block; }
+.chapter.afterplate { break-before: right; }
+.chapter header img.vig, .end img.vig { display: block; width: 34mm; height: 34mm; object-fit: contain; margin: -10mm auto 6mm; }
+.end { break-before: page; text-align: center; padding-top: 66mm; page: front; }
+.end .m { width: 28mm; height: 8.4mm; margin: 0 auto; }
+.end .t { font: 500 8.6pt Disp; letter-spacing: .4em; color: #4b463f; margin: 7mm -.4em 0 0; text-transform: uppercase; }
+.end .s { font: italic 500 15pt Disp; color: #3a362f; margin-top: 2mm; }
 """
 
-ORN = "❦"
+PART_NUM = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"]
 
 
 def para_html(text):
     return "".join(f"<em>{html.escape(t)}</em>" if it else html.escape(t) for t, it in runs(typo(text)))
 
 
-def build_html(items, cover_png):
-    css = (CSS.replace("FONTS/", FONTS.as_uri() + "/").replace("ACCENT", ACCENT).replace("PAPER", PAPER)
+def build_html(items, assets):
+    css = (CSS.replace("FONTS/", FONTS.as_uri() + "/").replace("CRIMSON_LIGHT", art.CRIMSON_LIGHT)
+           .replace("ACCENT", ACCENT).replace("PAPER", PAPER)
            .replace("NIGHT", NIGHT).replace("IVORY", IVORY).replace("INK", INK))
+    cells = f'<div class="m">{art.cells_mark()}</div>'
+    brk = f'<div class="brk">{art.scene_break()}</div>'
     h = [f'<!doctype html><html lang="uk"><head><meta charset="utf-8"><title>{TITLE}. {ACT}. {SUBTITLE}</title>',
          f'<meta name="author" content="{AUTHOR}"><style>{css}</style></head><body>']
-    h.append(f'<section class="cover"><img src="{cover_png.as_uri()}"></section>')
-    h.append(f'<section class="front halftitle"><div class="t">{TITLE.upper()}</div><div class="s">{ACT} · {SUBTITLE}</div></section>')
+    h.append(f'''<section class="cover"><img class="bg" src="{assets["cover_bg"].as_uri()}">
+      <div class="author">{AUTHOR.upper()}</div><div class="t">{TITLE.upper()}</div><div class="rule"></div>
+      <div class="act">{ACT.upper()}</div><div class="s">{SUBTITLE}</div></section>''')
+    h.append(f'<section class="front halftitle" style="break-before: right"><div class="t">{TITLE.upper()}</div>{cells}</section>')
     h.append(f'''<section class="front titlepage"><div class="author">{AUTHOR.upper()}</div>
       <div class="t">{TITLE.upper()}</div><div class="rule"></div>
-      <div class="act">{ACT.upper()}</div><div class="s">{SUBTITLE}</div><div class="orn">{ORN}</div></section>''')
+      <div class="act">{ACT.upper()}</div><div class="s">{SUBTITLE}</div>
+      <div class="m">{art.cells_mark()}</div></section>''')
     h.append(f'''<section class="front colophon">
       <p>{AUTHOR}. {TITLE}. {ACT}: {SUBTITLE}.</p>
       <p>Книга у всесвіті гри «{TITLE}».</p>
-      <p>Обкладинка — арт автора.</p>
+      <p>Набрано шрифтами EB Garamond і Cormorant Garamond.</p>
       <p>© {AUTHOR}. Усі права застережено.</p></section>''')
-    h.append('<section class="front epigraph"><p>Ми стали пам’яттю.</p></section>')
+    h.append(f'<section class="front epigraph" style="break-before: right"><p>Ми стали пам’яттю.</p>{cells}</section>')
 
-    # зміст
-    h.append('<section class="toc"><h2>ЗМІСТ</h2><ul>')
+    h.append(f'<section class="toc"><h2>ЗМІСТ</h2>{cells}<ul>')
     for it in items:
         if it["kind"] == "part":
-            h.append(f'<li class="part">{html.escape(it["label"])} · <em>{html.escape(typo(it["name"]))}</em></li>')
+            h.append(f'<li class="tpart">{html.escape(it["label"])} · <em>{html.escape(typo(it["name"]))}</em></li>')
         else:
             lab = it["label"].replace("Розділ ", "")
             h.append(f'<li><a href="#{it["id"]}"><span class="lab">{html.escape(lab)}</span>{html.escape(typo(it["name"]))}</a></li>')
     h.append("</ul></section>")
 
+    pn = 0
     for it in items:
         if it["kind"] == "part":
-            h.append(f'<section class="partpage"><div class="lab">{html.escape(it["label"])}</div>'
-                     f'<h1>{html.escape(typo(it["name"]))}</h1><div class="orn">{ORN}</div></section>')
+            bg = assets.get(f"part{pn + 1}_bg", assets["part_bg"])
+            h.append(f'<section class="partpage"><img class="bg" src="{bg.as_uri()}">'
+                     f'<div class="num">{PART_NUM[pn]}</div>'
+                     f'<div class="lab">{html.escape(it["label"])}</div><h1>{html.escape(typo(it["name"]))}</h1></section>')
+            pn += 1
             continue
-        h.append(f'<section class="chapter" id="{it["id"]}"><header><div class="lab">{html.escape(it["label"])}</div>'
-                 f'<h2>{html.escape(typo(it["name"]))}</h2><div class="rule"></div></header>')
+        if it["num"] == 0 and "prolog_plate" in assets:
+            h.append(f'<section class="plate"><img src="{assets["prolog_plate"].as_uri()}"></section>')
+        vig = assets.get(f'ch{it["num"]}')
+        vig = f'<img class="vig" src="{vig.as_uri()}">' if vig else ""
+        h.append(f'<section class="chapter{" afterplate" if it["num"] == 0 and "prolog_plate" in assets else ""}" id="{it["id"]}">'
+                 f'<header>{vig}<div class="lab">{html.escape(it["label"])}</div>'
+                 f'<h2>{html.escape(typo(it["name"]))}</h2>{cells}</header>')
         first = True
         for b in it["blocks"]:
             if b is None:
-                h.append('<div class="brk">* * *</div>')
+                h.append(brk)
                 first = True
                 continue
             cls = ""
@@ -318,21 +376,28 @@ def build_html(items, cover_png):
                 body = f'<span class="dc">{body[0]}</span>{body[1:]}'
             h.append(f'<p class="{cls}">{body}</p>' if cls else f"<p>{body}</p>")
         h.append("</section>")
-    h.append(f'<section class="end"><div class="orn">{ORN}</div><div class="t">Далі — акт другий</div>'
+    endmark = f'<img class="vig" src="{assets["end"].as_uri()}">' if "end" in assets else f'<div class="m">{art.sprout_mark()}</div>'
+    h.append(f'<section class="end">{endmark}<div class="t">Далі — акт другий</div>'
              f'<div class="s">Напівмертвий загін</div></section>')
     h.append("</body></html>")
     return "\n".join(h)
 
 
-def build_pdf(items, cover_png, path):
+def build_pdf(items, assets, path):
     from weasyprint import HTML
-    src = build_html(items, cover_png)
-    HTML(string=src, base_url=str(ROOT)).write_pdf(path, pdf_variant=None)
+    HTML(string=build_html(items, assets), base_url=str(ROOT)).write_pdf(path)
+
+
+def cover_from_pdf(pdf, path, dpi=250):
+    """Перша сторінка PDF → JPEG: обкладинка для DOCX і окремим файлом."""
+    subprocess.run(["pdftoppm", "-f", "1", "-l", "1", "-r", str(dpi), "-jpeg", "-jpegopt", "quality=92",
+                    "-singlefile", str(pdf), str(path.with_suffix(""))], check=True)
+    return path
 
 
 # ----------------------------------------------------------------- DOCX ----
 
-def build_docx(items, cover_png, path, toc_pages=None):
+def build_docx(items, cover_png, assets, path, toc_pages=None):
     from docx import Document
     from docx.enum.section import WD_SECTION
     from docx.enum.style import WD_STYLE_TYPE
@@ -454,7 +519,7 @@ def build_docx(items, cover_png, path, toc_pages=None):
         sec.first_page_header.is_linked_to_previous = False
         sec.first_page_footer.is_linked_to_previous = False
         sec.different_first_page_header_footer = first_blank
-        for hdr, text in ((sec.header, title or ""), (sec.even_page_header, "Ч И С Т И Л И Щ Е" if title else "")):
+        for hdr, text in ((sec.header, title or ""), (sec.even_page_header, "ЧИСТИЛИЩЕ" if title else "")):
             p = hdr.paragraphs[0]; p.style = st["Header Text"]
             p.text = ""
             if text:
@@ -488,12 +553,13 @@ def build_docx(items, cover_png, path, toc_pages=None):
     doc.add_paragraph("—", style="Ornament").runs[0].font.size = Pt(12)
     doc.add_paragraph(ACT, style="Front Small")
     doc.add_paragraph(SUBTITLE, style="Front Sub")
-    o = doc.add_paragraph(ORN, style="Ornament"); o.paragraph_format.space_before = Pt(110)
+    o = doc.add_paragraph(style="Ornament"); o.paragraph_format.space_before = Pt(120)
+    o.add_run().add_picture(str(assets["cells"]), width=Mm(16))
     s = new_section(); headers(s, numbers=False, first_blank=False)
     c = doc.add_paragraph(f"{AUTHOR}. {TITLE}. {ACT}: {SUBTITLE}.", style="Colophon")
     c.paragraph_format.space_before = Pt(360)
     doc.add_paragraph(f"Книга у всесвіті гри «{TITLE}».", style="Colophon")
-    doc.add_paragraph("Обкладинка — арт автора.", style="Colophon")
+    doc.add_paragraph("Набрано шрифтами EB Garamond і Cormorant Garamond.", style="Colophon")
     doc.add_paragraph(f"© {AUTHOR}. Усі права застережено.", style="Colophon")
     s = new_section(WD_SECTION.ODD_PAGE); headers(s, numbers=False, first_blank=False)
     ep = doc.add_paragraph("Ми стали пам’яттю.", style="Epigraph"); ep.paragraph_format.left_indent = Mm(26)
@@ -528,22 +594,40 @@ def build_docx(items, cover_png, path, toc_pages=None):
     run = OxmlElement("w:r"); el = OxmlElement("w:fldChar"); el.set(qn("w:fldCharType"), "end"); run.append(el); last._p.append(run)
 
     # --- текст
-    pending_part = None
+    pn = 0
     for it in items:
         if it["kind"] == "part":
+            pn += 1
             s = new_section(WD_SECTION.ODD_PAGE); headers(s, numbers=False, first_blank=False)
             doc.add_paragraph(it["label"], style="Part Label")
             doc.add_paragraph(typo(it["name"]), style="Heading 1")
-            doc.add_paragraph(ORN, style="Ornament")
+            o = doc.add_paragraph(style="Ornament"); o.paragraph_format.space_before = Pt(36)
+            pimg = assets.get(f"part{pn}_img")
+            if pimg:
+                o.add_run().add_picture(str(pimg), width=Mm(72))
+            else:
+                o.add_run().add_picture(str(assets["part_light"]), width=Mm(110))
             continue
+        if it["num"] == 0 and "prolog_plate" in assets:
+            s = new_section(); headers(s, numbers=False, first_blank=False)
+            pp = doc.add_paragraph(style="Ornament"); pp.paragraph_format.space_before = Pt(10)
+            pp.add_run().add_picture(str(assets["prolog_plate"]), width=Mm(110))
         s = new_section(); headers(s, title=typo(it["name"]))
-        doc.add_paragraph(it["label"], style="Chapter Label")
+        vig = assets.get(f'ch{it["num"]}')
+        cl = doc.add_paragraph(it["label"], style="Chapter Label")
+        if vig:
+            cl.paragraph_format.space_before = Pt(18)
+            vp = doc.add_paragraph(style="Ornament"); vp.paragraph_format.space_before = Pt(20)
+            vp.add_run().add_picture(str(vig), width=Mm(30))
+            cl._p.addprevious(vp._p)
         doc.add_paragraph(typo(it["name"]), style="Heading 2")
-        doc.add_paragraph("—", style="Chapter Rule")
+        cr = doc.add_paragraph(style="Chapter Rule")
+        cr.add_run().add_picture(str(assets["cells"]), width=Mm(11))
         first = True
         for b in it["blocks"]:
             if b is None:
-                doc.add_paragraph("* * *", style="Scene Break")
+                sb = doc.add_paragraph(style="Scene Break")
+                sb.add_run().add_picture(str(assets["break"]), width=Mm(26))
                 first = True
                 continue
             par = doc.add_paragraph(style="Body First" if first else "Normal")
@@ -562,7 +646,8 @@ def build_docx(items, cover_png, path, toc_pages=None):
                     if ital: r.italic = True
 
     s = new_section(); headers(s, numbers=False, first_blank=False)
-    o = doc.add_paragraph(ORN, style="Ornament"); o.paragraph_format.space_before = Pt(190)
+    o = doc.add_paragraph(style="Ornament"); o.paragraph_format.space_before = Pt(180)
+    o.add_run().add_picture(str(assets.get("end", assets["sprout"])), width=Mm(34 if "end" in assets else 28))
     e = doc.add_paragraph("Далі — акт другий", style="Front Small"); e.paragraph_format.space_before = Pt(14)
     doc.add_paragraph("Напівмертвий загін", style="Front Sub").runs[0].font.size = Pt(13)
 
@@ -673,16 +758,16 @@ def docx_toc_pages(docx_path, items):
 def main():
     OUT.mkdir(exist_ok=True)
     items = parse()
-    cover = make_cover(BUILD / "cover.jpg")
-    shutil.copy(cover, OUT / f"{BASENAME}_cover.jpg")
+    assets = make_assets()
     pdf = OUT / f"{BASENAME}.pdf"
-    build_pdf(items, cover, pdf)
+    build_pdf(items, assets, pdf)
     print("PDF:", pdf)
+    cover = cover_from_pdf(pdf, OUT / f"{BASENAME}_cover.jpg")
     docx = OUT / f"{BASENAME}.docx"
-    build_docx(items, cover, docx)
+    build_docx(items, cover, assets, docx)
     pages = docx_toc_pages(docx, items)
     if pages:
-        build_docx(items, cover, docx, pages)
+        build_docx(items, cover, assets, docx, pages)
         print("DOCX TOC pages:", pages)
     print("DOCX:", docx)
 
